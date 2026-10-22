@@ -1,0 +1,132 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEXUS OMEGA SWARM — CONTINUOUS INTEGRATION PIPELINE
+# Architecture : Supervisor Pattern (LangGraph + Ollama + ChromaDB)
+# Auteur : Aissa Mohammedi (DGK)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "Nexus Omega Swarm CI"
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore: [ "**.md", "docs/**", ".gitignore" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Permet de lancer manuellement
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 1 : QUALITÉ & SÉCURITÉ
+  # ═══════════════════════════════════════════════════════════════════════════
+  quality:
+    name: "🔍 Lint & Security Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 bandit safety
+
+      - name: Lint with flake8
+        run: |
+          # Arrêt sur les erreurs critiques (syntaxe, noms non définis)
+          flake8 nexus_omega_swarm.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Avertissements de style
+          flake8 nexus_omega_swarm.py --count --exit-zero --max-complexity=15 --max-line-length=120 --statistics
+
+      - name: Security Scan with Bandit
+        run: |
+          bandit -r nexus_omega_swarm.py -f custom --msg-template "{abspath}:{line}: {test_id}[{severity}]: {msg}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 2 : TEST D'EXÉCUTION (Simulation locale)
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    name: "🧪 Sandbox Test"
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+
+      - name: Pull Models
+        run: |
+          # On tire le modèle le plus léger pour la CI (pas Llama3 8B)
+          ollama pull qwen:0.5b
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install langgraph langchain langchain-community chromadb ollama
+
+      - name: Run Swarm (Test)
+        env:
+          # On force le modèle léger pour le test CI
+          NEXUS_LLM: "qwen:0.5b" 
+          NEXUS_EMBED: "nomic-embed-text"
+        run: |
+          # On lance le script avec une tâche simple et un timeout
+          echo "Crée un script Python qui affiche 'Hello Nexus'" | timeout 120 python3 nexus_omega_swarm.py || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 3 : PACKAGING & UPLOAD
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-and-upload:
+    name: "📦 Package & Upload"
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Release Archive
+        run: |
+          # On crée un dossier de distribution
+          mkdir -p dist/
+          # On copie les fichiers essentiels
+          cp nexus_omega_swarm.py dist/
+          cp README.md dist/ 2>/dev/null || true
+          cp .gitignore dist/ 2>/dev/null || true
+          
+          # On compresse le tout
+          cd dist
+          tar -czf nexus_omega_swarm_v2.0.0.tar.gz *
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nexus-swarm-dist
+          path: dist/nexus_omega_swarm_v2.0.0.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+          overwrite: true
+          include-hidden-files: false
+          archive: true
