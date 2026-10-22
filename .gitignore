@@ -1,18 +1,49 @@
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEXUS OMEGA SWARM - .gitignore
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Other files and folders
-.settings/
+# --- Environnements virtuels ---
+venv/
+.venv/
+env/
+ENV/
 
-# Executables
-*.swf
-*.air
-*.ipa
-*.apk
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
 
-# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
-# should NOT be excluded as they contain compiler settings and other important
-# information for Eclipse / Flash Builder.
+# --- Logs & Bases de données locales ---
+logs/
+*.log
+nexus_memory_db/
+*.sqlite
+*.db
+chroma.sqlite3/
+
+# --- Sandbox d'exécution ---
+sandbox/
+exec_*.py
+
+# --- Secrets & Configs ---
+.env
+.env.local
+*.pem
+*.key
+config.local.json
+
+# --- OS / IDE ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Modèles LLM locaux (si présents) ---
+*.gguf
+*.bin
+models/
