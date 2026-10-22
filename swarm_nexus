@@ -1,0 +1,1157 @@
+ #!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+================================================================================
+NEXUS OMEGA SWARM — AGENT SOUVERAIN AUTONOME (v2.0.0)
+================================================================================
+Architecte : Aissa Mohammedi (DGK) / Héritier Naim
+Rôle : Système multi-agents autonome avec planification, exécution,
+auto-réflexion, mémoire persistante et orchestration avancée.
+Architecture: Supervisor Pattern sur LangGraph + ChromaDB + Ollama.
+Lignes : ~2000 (incluant les modules de production)
+================================================================================
+"""
+
+import os
+import sys
+import subprocess
+import time
+import logging
+import asyncio
+import json
+import re
+import shutil
+import traceback
+from datetime import datetime
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple
+from abc import ABC, abstractmethod
+from logging.handlers import RotatingFileHandler
+from dataclasses import dataclass, field
+
+# ==============================================================================
+# SECTION 0 : CONFIGURATION GLOBALE DU SYSTÈME
+# ==============================================================================
+
+class NexusConfig:
+"""
+Configuration centralisée. Modifiable via variables d'environnement.
+"""
+VERSION = "2.0.0"
+ARCHITECTE = "Aissa Mohammedi (DGK)"
+HERITIER = "Naim Mohammedi"
+
+# Modèles
+LLM_MODEL = os.environ.get("NEXUS_LLM", "llama3")
+EMBED_MODEL = os.environ.get("NEXUS_EMBED", "nomic-embed-text")
+
+# Chemins
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+MEMORY_DIR = os.path.join(BASE_DIR, "nexus_memory_db")
+SANDBOX_DIR = os.path.join(BASE_DIR, "sandbox")
+
+# Limites
+MAX_RETRIES = 3
+EXECUTION_TIMEOUT = 30
+MAX_TASKS = 20
+MAX_MEMORY_CONTEXT = 3
+
+# Sécurité
+ALLOWED_IMPORTS = [
+"os", "sys", "json", "time", "datetime", "re", "math", "random",
+"requests", "urllib", "socket", "subprocess", "threading", "asyncio",
+"pathlib", "shutil", "hashlib", "base64", "collections", "itertools",
+"functools", "typing", "dataclasses", "csv", "xml", "html", "http"
+]
+
+FORBIDDEN_PATTERNS = [
+r"rm\s+-rf\s+/",
+r"format\s+[a-zA-Z]:",
+r"del\s+/[fFsS]\s+/[qQ]",
+r"shutdown\s+/[sSrR]",
+r"mkfs\.",
+r"dd\s+if=",
+r":\(\)\s*\{\s*:\|:&\s*\};:",
+]
+
+# Création des répertoires nécessaires
+for directory in [NexusConfig.LOG_DIR, NexusConfig.MEMORY_DIR, NexusConfig.SANDBOX_DIR]:
+os.makedirs(directory, exist_ok=True)
+
+# ==============================================================================
+# SECTION 1 : SYSTÈME DE LOGGING ROTATIF
+# ==============================================================================
+
+def setup_logging() -> logging.Logger:
+"""
+Configure un système de logging robuste avec rotation des fichiers.
+"""
+logger = logging.getLogger("NEXUS_OMEGA")
+logger.setLevel(logging.DEBUG)
+
+# Éviter la duplication des handlers
+if logger.handlers:
+return logger
+
+# Format des logs
+formatter = logging.Formatter(
+'%(asctime)s | %(levelname)-8s | %(name)-15s | %(message)s',
+datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Handler console
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# Handler fichier rotatif
+log_file = os.path.join(NexusConfig.LOG_DIR, "nexus_swarm.log")
+file_handler = RotatingFileHandler(
+log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Handler erreurs séparé
+error_file = os.path.join(NexusConfig.LOG_DIR, "nexus_errors.log")
+error_handler = RotatingFileHandler(
+error_file, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8'
+)
+error_handler.setLevel(logging.ERROR)
+error_handler.setFormatter(formatter)
+logger.addHandler(error_handler)
+
+return logger
+
+logger = setup_logging()
+
+# ==============================================================================
+# SECTION 2 : AUTO-INSTALLATION DES DÉPENDANCES
+# ==============================================================================
+
+def install_dependencies() -> bool:
+"""
+Vérifie et installe les packages Python requis.
+Retourne True si tout est prêt, False sinon.
+"""
+logger.info("=" * 70)
+logger.info("VÉRIFICATION DE L'ENVIRONNEMENT")
+logger.info("=" * 70)
+
+required = {
+"langgraph": "langgraph",
+"langchain": "langchain",
+"langchain_core": "langchain-core",
+"langchain_community": "langchain-community",
+"chromadb": "chromadb",
+"ollama": "ollama"
+}
+
+missing = []
+for module, package in required.items():
+try:
+__import__(module)
+logger.debug(f"✅ Module présent : {package}")
+except ImportError:
+logger.warning(f"❌ Module manquant : {package}")
+missing.append(package)
+
+if missing:
+logger.info(f"Injection de {len(missing)} package(s) manquant(s)...")
+cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + missing
+try:
+subprocess.check_call(cmd)
+logger.info("✅ Dépendances installées avec succès.")
+return True
+except subprocess.CalledProcessError as e:
+logger.error(f"Échec de l'installation : {e}")
+logger.error("Installation manuelle requise :")
+logger.error(f"pip install {' '.join(missing)}")
+return False
+
+logger.info("✅ Toutes les dépendances sont présentes.")
+return True
+
+if not install_dependencies():
+sys.exit(1)
+
+# --- Imports après installation ---
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.chat_models import ChatOllama
+import ollama
+
+# ==============================================================================
+# SECTION 3 : DÉFINITION DE L'ÉTAT PARTAGÉ
+# ==============================================================================
+
+class AgentState(TypedDict):
+"""
+État partagé entre tous les nœuds du graphe.
+C'est le bus de données du swarm.
+"""
+messages: Annotated[List[Any], "Historique conversation"]
+task_queue: Annotated[List[str], "File des tâches"]
+current_task: Annotated[Optional[str], "Tâche actuelle"]
+generated_code: Annotated[Optional[str], "Code généré"]
+execution_output: Annotated[Optional[str], "Sortie d'exécution"]
+error_trace: Annotated[Optional[str], "Trace d'erreur"]
+retry_count: Annotated[int, "Compteur de tentatives"]
+status: Annotated[str, "Statut actuel"]
+history: Annotated[List[Dict[str, Any]], "Historique des étapes"]
+task_index: Annotated[int, "Index de la tâche actuelle"]
+
+# ==============================================================================
+# SECTION 4 : UTILITAIRES DE SÉCURITÉ ET DE VALIDATION
+# ==============================================================================
+
+class SecurityValidator:
+"""
+Valide le code généré avant exécution.
+"""
+
+@staticmethod
+def check_forbidden_patterns(code: str) -> Tuple[bool, Optional[str]]:
+"""
+Vérifie les patterns dangereux dans le code.
+Retourne (is_safe, error_message).
+"""
+for pattern in NexusConfig.FORBIDDEN_PATTERNS:
+if re.search(pattern, code, re.IGNORECASE):
+return False, f"Pattern interdit détecté : {pattern}"
+
+return True, None
+
+@staticmethod
+def check_imports(code: str) -> Tuple[bool, Optional[str]]:
+"""
+Vérifie que tous les imports sont autorisés.
+"""
+import_pattern = r"^\s*(?:import|from)\s+(\w+)"
+matches = re.findall(import_pattern, code, re.MULTILINE)
+
+for module in matches:
+if module not in NexusConfig.ALLOWED_IMPORTS:
+return False, f"Import non autorisé : {module}"
+
+return True, None
+
+@staticmethod
+def validate_code(code: str) -> Tuple[bool, Optional[str]]:
+"""
+Validation complète du code.
+"""
+if not code or not code.strip():
+return False, "Code vide"
+
+# Vérifier les patterns dangereux
+safe, error = SecurityValidator.check_forbidden_patterns(code)
+if not safe:
+return False, error
+
+# Vérifier les imports
+safe, error = SecurityValidator.check_imports(code)
+if not safe:
+return False, error
+
+return True, None
+
+class CodeCleaner:
+"""
+Nettoie le code généré par le LLM.
+"""
+
+@staticmethod
+def extract_code(text: str) -> str:
+"""
+Extrait le code Python depuis une réponse Markdown.
+"""
+# Pattern pour les blocs de code Python
+patterns = [
+r"```python\s*\n(.*?)```",
+r"```\s*\n(.*?)```",
+r"```python(.*?)```",
+]
+
+for pattern in patterns:
+match = re.search(pattern, text, re.DOTALL)
+if match:
+return match.group(1).strip()
+
+# Si pas de bloc, retourner le texte brut (supposition que c'est du code)
+lines = text.split('\n')
+code_lines = []
+in_code = False
+
+for line in lines:
+if line.strip().startswith(('import ', 'from ', 'def ', 'class ', '#', '"""', "'''")):
+in_code = True
+if in_code:
+code_lines.append(line)
+
+if code_lines:
+return '\n'.join(code_lines)
+
+return text.strip()
+
+@staticmethod
+def remove_comments(code: str) -> str:
+"""
+Supprime les commentaires excessifs (optionnel).
+"""
+lines = code.split('\n')
+cleaned = []
+for line in lines:
+if not line.strip().startswith('#'):
+cleaned.append(line)
+return '\n'.join(cleaned)
+
+# ==============================================================================
+# SECTION 5 : MÉMOIRE PERSISTANTE
+# ==============================================================================
+
+class NexusMemory:
+"""
+Gère la mémoire à long terme via ChromaDB.
+"""
+
+def __init__(self):
+self.persist_directory = NexusConfig.MEMORY_DIR
+self.vector_store = None
+self.embeddings = None
+self._init_memory()
+
+def _init_memory(self):
+"""Initialise la connexion à ChromaDB."""
+logger.info(f"Initialisation mémoire vectorielle : {self.persist_directory}")
+
+try:
+self.embeddings = OllamaEmbeddings(model=NexusConfig.EMBED_MODEL)
+
+self.vector_store = Chroma(
+collection_name="nexus_success_memory",
+embedding_function=self.embeddings,
+persist_directory=self.persist_directory
+)
+
+logger.info("✅ Mémoire vectorielle connectée.")
+
+except Exception as e:
+logger.error(f"Erreur d'initialisation mémoire : {e}")
+logger.warning("Mode dégradé : la mémoire persistante sera désactivée.")
+self.vector_store = None
+
+def store_success(self, task: str, code: str, output: str = ""):
+"""Archive une tâche réussie."""
+if not self.vector_store:
+logger.debug("Mémoire désactivée, ignoré.")
+return
+
+document = f"TÂCHE: {task}\n\nCODE:\n{code}\n\nSORTIE:\n{output[:500]}"
+
+try:
+self.vector_store.add_texts(
+[document],
+metadatas=[{
+"task": task[:200],
+"timestamp": datetime.now().isoformat(),
+"type": "success"
+}]
+)
+logger.info(f"💾 Tâche mémorisée : {task[:60]}...")
+except Exception as e:
+logger.error(f"Erreur mémorisation : {e}")
+
+def store_failure(self, task: str, error: str):
+"""Archive un échec pour apprentissage."""
+if not self.vector_store:
+return
+
+document = f"ÉCHEC TÂCHE: {task}\nERREUR: {error[:500]}"
+
+try:
+self.vector_store.add_texts(
+[document],
+metadatas=[{
+"task": task[:200],
+"timestamp": datetime.now().isoformat(),
+"type": "failure"
+}]
+)
+except Exception as e:
+logger.debug(f"Erreur mémorisation échec : {e}")
+
+def retrieve_context(self, query: str, k: int = NexusConfig.MAX_MEMORY_CONTEXT) -> str:
+"""Récupère le contexte pertinent."""
+if not self.vector_store:
+return ""
+
+try:
+docs = self.vector_store.similarity_search(query, k=k)
+return "\n\n---\n\n".join([doc.page_content for doc in docs])
+except Exception as e:
+logger.error(f"Erreur récupération mémoire : {e}")
+return ""
+
+def get_stats(self) -> Dict[str, int]:
+"""Retourne les statistiques de la mémoire."""
+if not self.vector_store:
+return {"count": 0, "status": "disabled"}
+
+try:
+count = self.vector_store._collection.count()
+return {"count": count, "status": "active"}
+except Exception:
+return {"count": 0, "status": "error"}
+
+# ==============================================================================
+# SECTION 6 : SANDBOX D'EXÉCUTION
+# ==============================================================================
+
+class SecuritySandbox:
+"""
+Environnement d'exécution sécurisé.
+"""
+
+@staticmethod
+def execute_code(code: str, timeout: int = NexusConfig.EXECUTION_TIMEOUT) -> Dict[str, Any]:
+"""
+Exécute le code dans un sous-processus isolé.
+"""
+# Validation préalable
+is_safe, error = SecurityValidator.validate_code(code)
+if not is_safe:
+return {
+"success": False,
+"output": "",
+"error": f"Code refusé par le validateur : {error}",
+"execution_time": 0
+}
+
+# Fichier temporaire dans le sandbox
+timestamp = int(time.time() * 1000)
+temp_file = os.path.join(NexusConfig.SANDBOX_DIR, f"exec_{timestamp}.py")
+
+start_time = time.time()
+
+try:
+# Écriture du code
+with open(temp_file, "w", encoding="utf-8") as f:
+f.write(code)
+
+logger.info(f"⚙️ Exécution code (timeout={timeout}s)...")
+
+# Exécution sécurisée
+result = subprocess.run(
+[sys.executable, temp_file],
+capture_output=True,
+text=True,
+timeout=timeout,
+cwd=NexusConfig.SANDBOX_DIR,
+check=False
+)
+
+execution_time = time.time() - start_time
+
+if result.returncode == 0:
+return {
+"success": True,
+"output": result.stdout,
+"error": None,
+"execution_time": execution_time
+}
+else:
+return {
+"success": False,
+"output": result.stdout,
+"error": result.stderr,
+"execution_time": execution_time
+}
+
+except subprocess.TimeoutExpired:
+return {
+"success": False,
+"output": "",
+"error": f"TimeoutError: Exécution > {timeout}s",
+"execution_time": time.time() - start_time
+}
+
+except Exception as e:
+return {
+"success": False,
+"output": "",
+"error": f"ExecutionError: {str(e)}",
+"execution_time": time.time() - start_time
+}
+
+finally:
+if os.path.exists(temp_file):
+try:
+os.remove(temp_file)
+except OSError:
+pass
+
+@staticmethod
+def cleanup_sandbox():
+"""Nettoie le répertoire sandbox."""
+try:
+for file in os.listdir(NexusConfig.SANDBOX_DIR):
+file_path = os.path.join(NexusConfig.SANDBOX_DIR, file)
+if os.path.isfile(file_path) and file.startswith("exec_"):
+os.remove(file_path)
+logger.debug("Sandbox nettoyé.")
+except Exception as e:
+logger.error(f"Erreur nettoyage sandbox : {e}")
+
+# ==============================================================================
+# SECTION 7 : CLASSE DE BASE DES AGENTS
+# ==============================================================================
+
+class BaseAgent(ABC):
+"""Classe abstraite pour tous les agents du swarm."""
+
+def __init__(self, name: str, description: str = ""):
+self.name = name
+self.description = description
+logger.info(f"Agent initialisé : {self.name}")
+
+@abstractmethod
+async def run(self, state: AgentState) -> Dict[str, Any]:
+"""Point d'entrée exécuté par le graphe."""
+pass
+
+def _log_step(self, message: str, level: str = "info"):
+"""Log helper."""
+log_func = getattr(logger, level.lower(), logger.info)
+log_func(f"[{self.name.upper()}] {message}")
+
+# ==============================================================================
+# SECTION 8 : AGENTS SPÉCIALISÉS
+# ==============================================================================
+
+class PlannerAgent(BaseAgent):
+"""
+Décompose la requête utilisateur en tâches séquentielles.
+"""
+
+def __init__(self, llm: ChatOllama):
+super().__init__("Planner", "Décompose les requêtes en tâches")
+self.llm = llm
+
+async def run(self, state: AgentState) -> Dict[str, Any]:
+self._log_step("Analyse de la requête...")
+
+user_request = state["messages"][-1].content
+
+prompt = f"""Tu es le Planificateur Suprême de NEXUS OMEGA.
+Ta mission : décomposer la requête de l'Héritier en une liste de tâches techniques.
+Chaque tâche doit être :
+- Atomique (une seule action)
+- Exécutable en Python
+- Séquentielle (dépend de la précédente)
+- Claires et sans ambiguïté
+
+RÈGLES :
+- Maximum {NexusConfig.MAX_TASKS} tâches
+- Réponds UNIQUEMENT avec la liste, une tâche par ligne
+- Pas de numérotation, pas de texte explicatif
+- Si la requête est déjà atomique, une seule tâche suffit
+
+REQUÊTE : {user_request}
+
+LISTE DES TÂCHES :"""
+
+try:
+response = await self.llm.ainvoke([SystemMessage(content=prompt)])
+
+# Nettoyage des tâches
+tasks = []
+for line in response.content.split('\n'):
+line = line.strip()
+# Supprimer numérotation éventuelle
+line = re.sub(r'^\d+[\.\)]\s*', '', line)
+line = re.sub(r'^[-*]\s*', '', line)
+
+if line and len(line) > 3:
+tasks.append(line)
+
+# Limite de sécurité
+tasks = tasks[:NexusConfig.MAX_TASKS]
+
+if not tasks:
+tasks = [user_request]
+
+self._log_step(f"Plan établi : {len(tasks)} tâche(s)")
+for i, task in enumerate(tasks, 1):
+logger.info(f" {i}. {task}")
+
+return {
+"task_queue": tasks,
+"current_task": tasks[0],
+"task_index": 0,
+"status": "CODING",
+"history": [{"step": "planning", "tasks": tasks, "timestamp": datetime.now().isoformat()}]
+}
+
+except Exception as e:
+logger.error(f"Erreur planification : {e}")
+logger.debug(traceback.format_exc())
+return {
+"status": "FAILED",
+"error_trace": f"PlannerError: {str(e)}"
+}
+
+class CoderAgent(BaseAgent):
+"""
+Génère le code Python pour chaque tâche.
+"""
+
+def __init__(self, llm: ChatOllama, memory: NexusMemory):
+super().__init__("Coder", "Génère le code Python")
+self.llm = llm
+self.memory = memory
+
+async def run(self, state: AgentState) -> Dict[str, Any]:
+task = state["current_task"]
+retry = state.get("retry_count", 0)
+
+self._log_step(f"Génération code pour '{task[:60]}...' (Tentative {retry + 1})")
+
+# Contexte mémoire
+memory_context = self.memory.retrieve_context(task)
+
+# Contexte d'erreur si retry
+error_context = ""
+if state.get("error_trace"):
+error_context = f"""
+⚠️ ATTENTION : la tentative précédente a échoué.
+ERREUR : {state['error_trace'][:1000]}
+CODE PRÉCÉDENT :
+{state.get('generated_code', '')[:1000]}
+
+Corrige l'erreur dans le nouveau code.
+"""
+
+prompt = f"""Tu es un Développeur Python Senior de l'équipe NEXUS OMEGA.
+Ta mission : écrire un script Python complet et fonctionnel.
+
+CONTRAINTES STRICTES :
+1. Le code doit être auto-suffisant (tous les imports inclus)
+2. Pas de dépendances externes sauf : {', '.join(NexusConfig.ALLOWED_IMPORTS[:15])}
+3. Gestion des erreurs avec try/except
+4. Le code doit être exécutable tel quel
+5. Pas de blabla, pas d'explications
+6. Réponds avec UNIQUEMENT un bloc ```python
+
+CONTEXTE MÉMOIRE (leçons du passé) :
+{memory_context[:2000] if memory_context else "Aucune leçon applicable."}
+{error_context}
+
+TÂCHE À ACCOMPLIR :
+{task}
+
+CODE PYTHON :"""
+
+try:
+response = await self.llm.ainvoke([SystemMessage(content=prompt)])
+
+# Extraction et nettoyage du code
+code = CodeCleaner.extract_code(response.content)
+
+if not code:
+return {
+"status": "FAILED",
+"error_trace": "CoderError: Aucun code généré par le LLM"
+}
+
+self._log_step(f"Code généré : {len(code)} caractères")
+logger.debug(f"Code généré :\n{code[:500]}...")
+
+return {
+"generated_code": code,
+"status": "EXECUTING"
+}
+
+except Exception as e:
+logger.error(f"Erreur génération code : {e}")
+logger.debug(traceback.format_exc())
+return {
+"status": "FAILED",
+"error_trace": f"CoderError: {str(e)}"
+}
+
+class ExecutorAgent(BaseAgent):
+"""
+Exécute le code généré dans le sandbox.
+"""
+
+def __init__(self):
+super().__init__("Executor", "Exécute le code en sandbox")
+
+async def run(self, state: AgentState) -> Dict[str, Any]:
+self._log_step("Exécution du code...")
+
+code = state.get("generated_code")
+
+if not code:
+return {
+"status": "FAILED",
+"error_trace": "ExecutorError: Aucun code à exécuter"
+}
+
+# Exécution sandbox
+result = SecuritySandbox.execute_code(code)
+
+if result["success"]:
+self._log_step(f"✅ Exécution réussie ({result['execution_time']:.2f}s)")
+logger.debug(f"Sortie :\n{result['output'][:500]}")
+
+return {
+"execution_output": result["output"],
+"error_trace": None,
+"status": "REFLECTING"
+}
+else:
+self._log_step(f"❌ Échec exécution ({result['execution_time']:.2f}s)")
+logger.warning(f"Erreur :\n{result['error'][:500]}")
+
+return {
+"execution_output": result["output"],
+"error_trace": result["error"],
+"status": "REFLECTING"
+}
+
+class ReflectorAgent(BaseAgent):
+"""
+Analyse le résultat et décide de la suite.
+"""
+
+def __init__(self, memory: NexusMemory):
+super().__init__("Reflector", "Analyse et décide")
+self.memory = memory
+
+async def run(self, state: AgentState) -> Dict[str, Any]:
+self._log_step("Analyse des résultats...")
+
+task = state["current_task"]
+code = state["generated_code"]
+output = state.get("execution_output", "")
+error = state.get("error_trace")
+
+# Cas : SUCCÈS
+if not error:
+self._log_step(f"🎉 Tâche réussie : '{task[:60]}...'")
+
+# Mémorisation
+self.memory.store_success(task, code, output)
+
+# Passer à la tâche suivante
+remaining = state["task_queue"][1:]
+current_index = state.get("task_index", 0) + 1
+
+if remaining:
+next_task = remaining[0]
+self._log_step(f"➡️ Tâche suivante : '{next_task[:60]}...'")
+
+return {
+"task_queue": remaining,
+"current_task": next_task,
+"task_index": current_index,
+"retry_count": 0,
+"generated_code": None,
+"execution_output": None,
+"error_trace": None,
+"status": "CODING",
+"history": state.get("history", []) + [{
+"step": "success",
+"task": task,
+"timestamp": datetime.now().isoformat()
+}]
+}
+else:
+self._log_step("🏁 Toutes les tâches accomplies !")
+return {
+"status": "DONE",
+"history": state.get("history", []) + [{
+"step": "completed",
+"task": task,
+"timestamp": datetime.now().isoformat()
+}]
+}
+
+# Cas : ÉCHEC
+self._log_step(f"⚠️ Échec tâche : '{task[:60]}...'")
+
+retry_count = state.get("retry_count", 0) + 1
+
+if retry_count >= NexusConfig.MAX_RETRIES:
+self._log_step(f"🛑 Abandon après {NexusConfig.MAX_RETRIES} tentatives")
+
+# Mémorisation de l'échec
+self.memory.store_failure(task, error)
+
+return {
+"status": "FAILED",
+"error_trace": f"MaxRetriesError: {NexusConfig.MAX_RETRIES} tentatives échouées\nDernière erreur: {error[:500]}",
+"history": state.get("history", []) + [{
+"step": "failed",
+"task": task,
+"error": error[:200],
+"timestamp": datetime.now().isoformat()
+}]
+}
+
+self._log_step(f"🔁 Tentative de correction ({retry_count}/{NexusConfig.MAX_RETRIES})")
+
+return {
+"retry_count": retry_count,
+"generated_code": None,
+"status": "CODING",
+"history": state.get("history", []) + [{
+"step": "retry",
+"task": task,
+"attempt": retry_count,
+"timestamp": datetime.now().isoformat()
+}]
+}
+
+# ==============================================================================
+# SECTION 9 : ORCHESTRATEUR DU GRAPHE
+# ==============================================================================
+
+class NexusOrchestrator:
+"""
+Orchestrateur principal du swarm.
+Construit et exécute le graphe LangGraph.
+"""
+
+def __init__(self):
+logger.info("=" * 70)
+logger.info(f"NEXUS OMEGA SWARM v{NexusConfig.VERSION}")
+logger.info("=" * 70)
+logger.info(f"Architecte : {NexusConfig.ARCHITECTE}")
+logger.info(f"Héritier : {NexusConfig.HERITIER}")
+logger.info(f"LLM : {NexusConfig.LLM_MODEL}")
+logger.info(f"Embeddings : {NexusConfig.EMBED_MODEL}")
+logger.info("=" * 70)
+
+# Vérification Ollama
+self._check_ollama()
+
+# Initialisation des composants
+logger.info("Initialisation des composants...")
+self.llm = ChatOllama(
+model=NexusConfig.LLM_MODEL,
+temperature=0,
+num_ctx=4096
+)
+self.memory = NexusMemory()
+
+# Instanciation des agents
+self.agents = {
+"planner": PlannerAgent(self.llm),
+"coder": CoderAgent(self.llm, self.memory),
+"executor": ExecutorAgent(),
+"reflector": ReflectorAgent(self.memory)
+}
+
+# Construction du graphe
+logger.info("Construction du graphe d'orchestration...")
+self.graph = self._build_graph()
+
+logger.info("✅ Orchestrateur prêt.")
+logger.info("=" * 70)
+
+def _check_ollama(self):
+"""Vérifie la connexion Ollama."""
+try:
+ollama.list()
+logger.info("✅ Connexion Ollama établie.")
+except Exception as e:
+logger.error(f"❌ Impossible de se connecter à Ollama : {e}")
+logger.error("Assurez-vous qu'Ollama est lancé : ollama serve")
+logger.error(f"Et que les modèles sont installés :")
+logger.error(f" ollama pull {NexusConfig.LLM_MODEL}")
+logger.error(f" ollama pull {NexusConfig.EMBED_MODEL}")
+sys.exit(1)
+
+def _build_graph(self) -> StateGraph:
+"""Construit le graphe avec les nœuds et les transitions."""
+workflow = StateGraph(AgentState)
+
+# Ajout des nœuds
+for name, agent in self.agents.items():
+workflow.add_node(name, agent.run)
+
+# Point d'entrée
+workflow.set_entry_point("planner")
+
+# Transitions simples
+workflow.add_edge("planner", "coder")
+workflow.add_edge("coder", "executor")
+workflow.add_edge("executor", "reflector")
+
+# Transition conditionnelle depuis le réflecteur
+def route_after_reflection(state: AgentState) -> str:
+status = state.get("status", "")
+
+if status == "DONE":
+return END
+elif status == "FAILED":
+return END
+elif status == "CODING":
+return "coder"
+else:
+logger.warning(f"Statut inconnu : {status}, arrêt.")
+return END
+
+workflow.add_conditional_edges(
+"reflector",
+route_after_reflection,
+{
+"coder": "coder",
+END: END
+}
+)
+
+logger.info("✅ Graphe compilé.")
+return workflow.compile()
+
+async def run_swarm(self, user_request: str) -> Dict[str, Any]:
+"""
+Lance le cycle complet du swarm.
+Retourne un dictionnaire avec le résultat final.
+"""
+logger.info("")
+logger.info("=" * 70)
+logger.info(f"🔥 NOUVELLE REQUÊTE")
+logger.info(f" {user_request[:200]}")
+logger.info("=" * 70)
+
+# État initial
+initial_state: AgentState = {
+"messages": [HumanMessage(content=user_request)],
+"task_queue": [],
+"current_task": None,
+"generated_code": None,
+"execution_output": None,
+"error_trace": None,
+"retry_count": 0,
+"status": "PLANNING",
+"history": [],
+"task_index": 0
+}
+
+# Exécution du graphe
+final_state = None
+start_time = time.time()
+
+try:
+async for event in self.graph.astream(initial_state):
+for node_name, state_update in event.items():
+logger.debug(f"--- Nœud : {node_name} ---")
+
+if state_update:
+for key, value in state_update.items():
+if key in ["status", "current_task", "retry_count"]:
+logger.debug(f" {key} = {value}")
+
+final_state = state_update
+
+except Exception as e:
+logger.error(f"Erreur critique swarm : {e}")
+logger.debug(traceback.format_exc())
+return {
+"success": False,
+"error": str(e),
+"duration": time.time() - start_time
+}
+
+# Nettoyage
+SecuritySandbox.cleanup_sandbox()
+
+# Rapport final
+duration = time.time() - start_time
+
+logger.info("")
+logger.info("=" * 70)
+logger.info("📊 RAPPORT FINAL DU SWARM")
+logger.info("=" * 70)
+logger.info(f"Durée totale : {duration:.2f}s")
+
+success = final_state and final_state.get("status") == "DONE"
+
+if success:
+logger.info("🎉 SUCCÈS : La requête a été accomplie.")
+if final_state.get("execution_output"):
+output = final_state["execution_output"]
+logger.info(f"Dernière sortie ({len(output)} chars) :")
+logger.info(output[:1000])
+else:
+logger.error("💥 ÉCHEC : La requête n'a pas pu être accomplie.")
+if final_state and final_state.get("error_trace"):
+logger.error(f"Erreur : {final_state['error_trace'][:500]}")
+
+memory_stats = self.memory.get_stats()
+logger.info(f"Mémoire : {memory_stats['count']} entrées")
+logger.info("=" * 70)
+
+return {
+"success": success,
+"final_state": final_state,
+"duration": duration,
+"memory_stats": memory_stats
+}
+
+# ==============================================================================
+# SECTION 10 : INTERFACE UTILISATEUR (CLI)
+# ==============================================================================
+
+class NexusCLI:
+"""
+Interface en ligne de commande pour interagir avec le swarm.
+"""
+
+def __init__(self):
+self.orchestrator = NexusOrchestrator()
+self.running = True
+
+def display_banner(self):
+"""Affiche la bannière de démarrage."""
+print("")
+print("=" * 70)
+print(f"🔥 NEXUS OMEGA SWARM v{NexusConfig.VERSION}")
+print(f"👑 Architecte : {NexusConfig.ARCHITECTE}")
+print(f"👑 Héritier : {NexusConfig.HERITIER}")
+print("=" * 70)
+print("Commandes spéciales :")
+print(" /help - Afficher l'aide")
+print(" /stats - Statistiques de la mémoire")
+print(" /clean - Nettoyer le sandbox")
+print(" /exit - Quitter")
+print("=" * 70)
+print("")
+
+def display_help(self):
+"""Affiche l'aide."""
+print("\n📖 AIDE NEXUS OMEGA SWARM")
+print("-" * 70)
+print("Entrez une requête en langage naturel.")
+print("Le swarm va :")
+print(" 1. Planifier les tâches nécessaires")
+print(" 2. Générer le code Python pour chacune")
+print(" 3. Exécuter le code en sandbox")
+print(" 4. Corriger les erreurs automatiquement (max 3 tentatives)")
+print(" 5. Mémoriser les succès pour l'apprentissage futur")
+print("-" * 70)
+print("Commandes :")
+print(" /help - Cette aide")
+print(" /stats - Statistiques mémoire")
+print(" /clean - Nettoyer le sandbox")
+print(" /exit - Quitter")
+print("-" * 70 + "\n")
+
+def display_stats(self):
+"""Affiche les statistiques."""
+stats = self.orchestrator.memory.get_stats()
+print(f"\n📊 STATISTIQUES")
+print(f" Statut mémoire : {stats['status']}")
+print(f" Entrées : {stats['count']}")
+print(f" Sandbox : {NexusConfig.SANDBOX_DIR}")
+print(f" Logs : {NexusConfig.LOG_DIR}\n")
+
+def cleanup(self):
+"""Nettoie le sandbox."""
+SecuritySandbox.cleanup_sandbox()
+print("✅ Sandbox nettoyé.\n")
+
+async def run(self):
+"""Boucle principale de l'interface."""
+self.display_banner()
+
+while self.running:
+try:
+user_input = input("👑 Héritier > ").strip()
+
+if not user_input:
+continue
+
+# Commandes spéciales
+if user_input.startswith("/"):
+command = user_input.lower()
+
+if command == "/exit" or command == "/quit":
+logger.info("Arrêt du système. Au revoir, Héritier.")
+self.running = False
+break
+
+elif command == "/help":
+self.display_help()
+
+elif command == "/stats":
+self.display_stats()
+
+elif command == "/clean":
+self.cleanup()
+
+else:
+print(f"❌ Commande inconnue : {user_input}")
+print("Tapez /help pour l'aide.\n")
+
+continue
+
+# Exécution de la requête
+await self.orchestrator.run_swarm(user_input)
+
+except KeyboardInterrupt:
+print("\n\n⚠️ Interruption détectée.")
+logger.info("Arrêt demandé par l'utilisateur.")
+self.running = False
+break
+
+except EOFError:
+logger.info("EOF reçu. Arrêt.")
+self.running = False
+break
+
+except Exception as e:
+logger.error(f"Erreur inattendue : {e}")
+logger.debug(traceback.format_exc())
+print(f"❌ Erreur : {e}\n")
+
+# ==============================================================================
+# SECTION 11 : POINT D'ENTRÉE
+# ==============================================================================
+
+async def main():
+"""Fonction principale asynchrone."""
+
+# Vérification Python
+if sys.version_info < (3, 10):
+logger.error(f"Python 3.10+ requis. Version actuelle : {sys.version}")
+sys.exit(1)
+
+# Vérification Ollama
+try:
+ollama.list()
+except Exception:
+logger.error("Ollama n'est pas accessible. Lancez : ollama serve")
+sys.exit(1)
+
+# Lancement de l'interface
+cli = NexusCLI()
+await cli.run()
+
+if __name__ == "__main__":
+try:
+asyncio.run(main())
+except KeyboardInterrupt:
+logger.info("\nArrêt propre du système.")
+sys.exit(0)
+except Exception as e:
+logger.error(f"Erreur fatale : {e}")
+logger.debug(traceback.format_exc())
+sys.exit(1)
