@@ -16,9 +16,6 @@ permissions:
   contents: read
   actions: read
 jobs:
-  # ═══════════════════════════════════════════════════════════════════════════
-  # JOB 1 : QUALITÉ & SÉCURITÉ
-  # ═══════════════════════════════════════════════════════════════════════════
   quality:
     name: "🔍 Lint & Security Scan"
     runs-on: ubuntu-latest
