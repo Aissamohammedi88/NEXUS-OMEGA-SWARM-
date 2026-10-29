@@ -6,12 +6,14 @@
       pull-requests: write
     outputs:
       changes_made: ${{ steps.check_changes.outputs.changes }}
+
     steps:
       - name: "📥 Commander le Référentiel"
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
+
       - name: "🐍 Configuration Python"
         uses: actions/setup-python@v5
         with:
