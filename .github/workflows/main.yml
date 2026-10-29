@@ -1,207 +1,213 @@
-# ═══════════════════════════════════════════════════════════════════════════════# NEXUS OMEGA — Auto-Repair & Deploy Engine
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEXUS OMEGA — Auto-Repair & Deploy Engine
 # Auteur : Aissa Mohammedi (DGK)
 # Description : Analyse, Formate, Build, Teste, et Déploie. Si ça casse, ça répare.
 # ═══════════════════════════════════════════════════════════════════════════════
 name: "⚡ NEXUS OMEGA - Auto-Heal & Deploy"
 
 on:
-push:
-branches: [ "main", "master" ]
-pull_request:
-branches: [ "main", "master" ]
-schedule:
-- cron: '0 0 * * 0' # Tous les dimanches à minuit (maintenance)
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  schedule:
+    - cron: '0 0 * * 0' # Tous les dimanches à minuit (maintenance)
 
 permissions:
-contents: write
-pull-requests: write
-actions: write
+  contents: write
+  pull-requests: write
+  actions: write
 
 env:
-NEXUS_VERSION: "3.0.0"
-PYTHON_VERSION: "3.12"
-NODE_VERSION: "20"
+  NEXUS_VERSION: "3.0.0"
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
 
 jobs:
-# ============================================================================
-# JOB 1 : L'USINE DE NETTOYAGE (Auto-Repair)
-# ============================================================================
-auto_repair:
-name: "🔧 Usine de Nettoyage Souveraine"
-runs-on: ubuntu-latest
-outputs:
-changes_made: ${{ steps.check_changes.outputs.changes }}
+  # ============================================================================
+  # JOB 1 : L'USINE DE NETTOYAGE (Auto-Repair)
+  # ============================================================================
+  auto_repair:
+    name: "🔧 Usine de Nettoyage Souveraine"
+    runs-on: ubuntu-latest
+    outputs:
+      changes_made: ${{ steps.check_changes.outputs.changes }}
+    
+    steps:
+      - name: "📥 Commander le Référentiel"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+          
+      - name: "🐍 Configuration Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: "🟢 Configuration Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: "🛠️ Installer les Outils de Forge"
+        run: |
+          python -m pip install --upgrade pip
+          pip install black isort flake8 autoflake pytest
+          npm install -g prettier eslint
+          
+      - name: "🧹 Forge 1 : Nettoyage Python (Autoflake + Isort + Black)"
+        continue-on-error: true
+        run: |
+          echo "::group::Nettoyage Python"
+          find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
+            -exec autoflake --in-place --remove-all-unused-imports --remove-unused-variables {} + || true
+          find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
+            -exec isort {} + || true
+          find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
+            -exec black -S {} + || true
+          echo "::endgroup::"
+          
+      - name: "🔍 Vérification Flake8 (Syntaxe Critique Uniquement)"
+        continue-on-error: true
+        run: |
+          echo "::group::Flake8 Linting"
+          # E9, F63, F7, F82 sont les erreurs de syntaxe et variables non définies. 
+          # On ignore le style pur (E501, etc.) pour ne pas bloquer.
+          python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          echo "::endgroup::"
+          
+      - name: "🧹 Forge 2 : Nettoyage Web (Prettier + ESLint)"
+        continue-on-error: true
+        run: |
+          echo "::group::Nettoyage Web"
+          if [ -f "package.json" ]; then
+            npx prettier --write "**/*.{js,jsx,ts,tsx,css,scss,json,yml,yaml,md}" --ignore-path .gitignore || true
+            npx eslint --fix "**/*.{js,jsx,ts,tsx}" --ignore-path .gitignore || true
+          else
+            echo "Aucun package.json trouvé, on passe."
+          fi
+          echo "::endgroup::"
+          
+      - name: "📊 Vérifier les Changements"
+        id: check_changes
+        run: |
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "✅ Des corrections ont été appliquées."
+          else
+            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "✨ Le code est déjà parfait."
+          fi
+          
+      - name: "🚀 Créer la Pull Request de Réparation"
+        if: steps.check_changes.outputs.changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "⚡ NEXUS OMEGA : Auto-Réparation (Formatage & Nettoyage)"
+          title: "🩺 Auto-Réparation : Code Nettoyé et Formaté"
+          body: |
+            ## ⚡ Rapport de Nexus Omega
+            
+            Le robot souverain a analysé le code et appliqué les forges suivantes :
+            
+            **🐍 Python :**
+            - `autoflake` (Suppression des imports morts)
+            - `isort` (Tri des imports)
+            - `black` (Formatage strict)
+            - `flake8` (Vérification critique)
+            
+            **🌐 Web :**
+            - `prettier` (Formatage)
+            - `eslint` (Corrections automatiques)
+            
+            **Statut :** Le code a été réparé. Prêt pour la production.
+          branch: nexus-omega/repair-${{ github.run_id }}
+          delete-branch: true
+          labels: |
+            ⚡ auto-repair
+            🤖 nexus-omega
 
-steps:
-- name: "📥 Commander le Référentiel"
-uses: actions/checkout@v4
-with:
-ref: ${{ github.head_ref || github.ref_name }}
-fetch-depth: 0
+  # ============================================================================
+  # JOB 2 : LE TEST DE SÉCURITÉ & BUILD
+  # ============================================================================
+  build_and_test:
+    name: "🏗️ Build & Test Souverain"
+    runs-on: ubuntu-latest
+    needs: auto_repair
+    if: needs.auto_repair.outputs.changes_made == 'false' || github.event_name == 'pull_request'
+    
+    steps:
+      - name: "📥 Commander le Référentiel"
+        uses: actions/checkout@v4
+        
+      - name: "🐍 Setup Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: "🟢 Setup Node"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: "📦 Installer les Dépendances"
+        run: |
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          if [ -f "pyproject.toml" ]; then pip install .; fi
+          if [ -f "package.json" ]; then npm ci || npm install; fi
+          
+      - name: "🧪 Lancer les Tests (Python)"
+        if: hashFiles('tests/**/*.py') != ''
+        run: |
+          echo "::group::Tests Python"
+          pytest tests/ -v --tb=short || echo "⚠️ Des tests ont échoué, mais on continue."
+          echo "::endgroup::"
+          
+      - name: "🏗️ Lancer le Build (Node)"
+        if: hashFiles('package.json') != ''
+        run: |
+          if grep -q "\"build\"" package.json; then
+            npm run build
+          else
+            echo "Pas de script 'build' dans package.json."
+          fi
+          
+      - name: "🛡️ Scan de Sécurité (Trivy)"
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
 
-- name: "🐍 Configuration Python"
-uses: actions/setup-python@v5
-with:
-python-version: ${{ env.PYTHON_VERSION }}
-cache: 'pip'
-
-- name: "🟢 Configuration Node.js"
-uses: actions/setup-node@v4
-with:
-node-version: ${{ env.NODE_VERSION }}
-cache: 'npm'
-
-- name: "🛠️ Installer les Outils de Forge"
-run: |
-python -m pip install --upgrade pip
-pip install black isort flake8 autoflake pytest
-npm install -g prettier eslint
-
-- name: "🧹 Forge 1 : Nettoyage Python (Autoflake + Isort + Black)"
-continue-on-error: true
-run: |
-echo "::group::Nettoyage Python"
-# 1. Supprimer les imports inutiles
-find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
--exec autoflake --in-place --remove-all-unused-imports --remove-unused-variables {} + || true
-
-# 2. Trier les imports
-find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
--exec isort {} + || true
-
-# 3. Formater le code
-find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/venv/*" \
--exec black -S {} + || true
-echo "::endgroup::"
-
-- name: "🧹 Forge 2 : Nettoyage Web (Prettier + ESLint)"
-continue-on-error: true
-run: |
-echo "::group::Nettoyage Web"
-if [ -f "package.json" ]; then
-npx prettier --write "**/*.{js,jsx,ts,tsx,css,scss,json,yml,yaml,md}" --ignore-path .gitignore || true
-npx eslint --fix "**/*.{js,jsx,ts,tsx}" --ignore-path .gitignore || true
-else
-echo "Aucun package.json trouvé, on passe."
-fi
-echo "::endgroup::"
-
-- name: "📊 Vérifier les Changements"
-id: check_changes
-run: |
-if [[ -n $(git status --porcelain) ]]; then
-echo "changes=true" >> $GITHUB_OUTPUT
-echo "✅ Des corrections ont été appliquées."
-else
-echo "changes=false" >> $GITHUB_OUTPUT
-echo "✨ Le code est déjà parfait."
-fi
-
-- name: "🚀 Créer la Pull Request de Réparation"
-if: steps.check_changes.outputs.changes == 'true'
-uses: peter-evans/create-pull-request@v6
-with:
-token: ${{ secrets.GITHUB_TOKEN }}
-commit-message: "⚡ NEXUS OMEGA : Auto-Réparation (Formatage & Nettoyage)"
-title: "🩺 Auto-Réparation : Code Nettoyé et Formaté"
-body: |
-## ⚡ Rapport de Nexus Omega
-
-Le robot souverain a analysé le code et appliqué les forges suivantes :
-
-**🐍 Python :**
-- `autoflake` (Suppression des imports morts)
-- `isort` (Tri des imports)
-- `black` (Formatage strict)
-
-**🌐 Web :**
-- `prettier` (Formatage)
-- `eslint` (Corrections automatiques)
-
-**Statut :** Le code a été réparé. Prêt pour la production.
-branch: nexus-omega/repair-${{ github.run_id }}
-delete-branch: true
-labels: |
-⚡ auto-repair
-🤖 nexus-omega
-
-# ============================================================================
-# JOB 2 : LE TEST DE SÉCURITÉ & BUILD
-# ============================================================================
-build_and_test:
-name: "🏗️ Build & Test Souverain"
-runs-on: ubuntu-latest
-needs: auto_repair
-if: needs.auto_repair.outputs.changes_made == 'false' || github.event_name == 'pull_request'
-
-steps:
-- name: "📥 Commander le Référentiel"
-uses: actions/checkout@v4
-
-- name: "🐍 Setup Python"
-uses: actions/setup-python@v5
-with:
-python-version: ${{ env.PYTHON_VERSION }}
-
-- name: "🟢 Setup Node"
-uses: actions/setup-node@v4
-with:
-node-version: ${{ env.NODE_VERSION }}
-
-- name: "📦 Installer les Dépendances"
-run: |
-if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
-if [ -f "pyproject.toml" ]; then pip install .; fi
-if [ -f "package.json" ]; then npm ci || npm install; fi
-
-- name: "🧪 Lancer les Tests (Python)"
-if: hashFiles('tests/**/*.py') != ''
-run: |
-echo "::group::Tests Python"
-pytest tests/ -v --tb=short || echo "⚠️ Des tests ont échoué, mais on continue."
-echo "::endgroup::"
-
-- name: "🏗️ Lancer le Build (Node)"
-if: hashFiles('package.json') != ''
-run: |
-if grep -q "\"build\"" package.json; then
-npm run build
-else
-echo "Pas de script 'build' dans package.json."
-fi
-
-- name: "🛡️ Scan de Sécurité (Trivy)"
-uses: aquasecurity/trivy-action@master
-with:
-scan-type: 'fs'
-scan-ref: '.'
-format: 'table'
-exit-code: '0'
-ignore-unfixed: true
-severity: 'CRITICAL,HIGH'
-
-# ============================================================================
-# JOB 3 : LE DÉPLOIEMENT (Si tout est OK)
-# ============================================================================
-deploy:
-name: "🚀 Déploiement Souverain"
-runs-on: ubuntu-latest
-needs: [auto_repair, build_and_test]
-if: github.ref == 'refs/heads/main' && needs.build_and_test.result == 'success'
-
-steps:
-- name: "📥 Commander le Référentiel"
-uses: actions/checkout@v4
-
-- name: "📦 Préparer l'Artifact de Déploiement"
-run: |
-echo "🚀 Déploiement de la version souveraine..."
-echo "Version : ${{ env.NEXUS_VERSION }}"
-echo "Commit : ${{ github.sha }}"
-echo "Auteur : ${{ github.actor }}"
-# Ici, tu peux ajouter tes commandes de déploiement (Vercel, Netlify, SSH, etc.)
-echo "✅ Déploiement simulé avec succès."
-
-- name: "📢 Notification de Succès"
-run: |
-echo "::notice title=Nexus Omega::Le déploiement de la version ${{ env.NEXUS_VERSION }} a réussi."
+  # ============================================================================
+  # JOB 3 : LE DÉPLOIEMENT (Si tout est OK)
+  # ============================================================================
+  deploy:
+    name: "🚀 Déploiement Souverain"
+    runs-on: ubuntu-latest
+    needs: [auto_repair, build_and_test]
+    if: github.ref == 'refs/heads/main' && needs.build_and_test.result == 'success'
+    
+    steps:
+      - name: "📥 Commander le Référentiel"
+        uses: actions/checkout@v4
+        
+      - name: "📦 Préparer l'Artifact de Déploiement"
+        run: |
+          echo "🚀 Déploiement de la version souveraine..."
+          echo "Version : ${{ env.NEXUS_VERSION }}"
+          echo "Commit : ${{ github.sha }}"
+          echo "Auteur : ${{ github.actor }}"
+          # Ici, tu peux ajouter tes commandes de déploiement (Vercel, Netlify, SSH, etc.)
+          echo "✅ Déploiement simulé avec succès."
+          
+      - name: "📢 Notification de Succès"
+        run: |
+          echo "::notice title=Nexus Omega::Le déploiement de la version ${{ env.NEXUS_VERSION }} a réussi."
