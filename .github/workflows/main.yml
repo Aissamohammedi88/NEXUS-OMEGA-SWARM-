@@ -3,9 +3,7 @@
 # Architecture : Supervisor Pattern (LangGraph + Ollama + ChromaDB)
 # Auteur : Aissa Mohammedi (DGK)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 name: "Nexus Omega Swarm CI"
-
 on:
   push:
     branches: [ "main", "master" ]
@@ -17,7 +15,6 @@ on:
 permissions:
   contents: read
   actions: read
-
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   # JOB 1 : QUALITÉ & SÉCURITÉ
@@ -29,7 +26,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -40,7 +36,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install flake8 bandit safety
-
       - name: Lint with flake8
         run: |
           # Arrêt sur les erreurs critiques (syntaxe, noms non définis)
@@ -51,7 +46,6 @@ jobs:
       - name: Security Scan with Bandit
         run: |
           bandit -r nexus_omega_swarm.py -f custom --msg-template "{abspath}:{line}: {test_id}[{severity}]: {msg}"
-
   # ═══════════════════════════════════════════════════════════════════════════
   # JOB 2 : TEST D'EXÉCUTION (Simulation locale)
   # ═══════════════════════════════════════════════════════════════════════════
