@@ -4,7 +4,6 @@
 # Description : Analyse, Formate, Build, Teste, et Déploie. Si ça casse, ça répare.
 # ═══════════════════════════════════════════════════════════════════════════════
 name: "⚡ NEXUS OMEGA - Auto-Heal & Deploy"
-
 on:
   push:
     branches: [ "main", "master" ]
@@ -12,17 +11,14 @@ on:
     branches: [ "main", "master" ]
   schedule:
     - cron: '0 0 * * 0' # Tous les dimanches à minuit (maintenance)
-
 permissions:
   contents: write
   pull-requests: write
   actions: write
-
 env:
   NEXUS_VERSION: "3.0.0"
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
-
 jobs:
   # ============================================================================
   # JOB 1 : L'USINE DE NETTOYAGE (Auto-Repair)
@@ -31,15 +27,13 @@ jobs:
     name: "🔧 Usine de Nettoyage Souveraine"
     runs-on: ubuntu-latest
     outputs:
-      changes_made: ${{ steps.check_changes.outputs.changes }}
-
+      changes_made: ${{ steps.check_changes.outputs.changes }
     steps:
       - name: "📥 Commander le Référentiel"
         uses: actions/checkout@v4
         with:
           ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
-
       - name: "🐍 Configuration Python"
         uses: actions/setup-python@v5
         with:
@@ -57,7 +51,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install black isort flake8 autoflake pytest
           npm install -g prettier eslint
-
       - name: "🧹 Forge 1 : Nettoyage Python (Autoflake + Isort + Black)"
         continue-on-error: true
         run: |
@@ -100,7 +93,6 @@ jobs:
             echo "changes=false" >> $GITHUB_OUTPUT
             echo "✨ Le code est déjà parfait."
           fi
-
       - name: "🚀 Créer la Pull Request de Réparation"
         if: steps.check_changes.outputs.changes == 'true'
         uses: peter-evans/create-pull-request@v6
